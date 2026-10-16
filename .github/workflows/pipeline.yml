@@ -149,7 +149,7 @@ jobs:
           # TODO 3 - the secret holding your server's public IP.
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
-          # TODO 4 - the secret holding your .pem private key.
+          # TODO 4 - the secret holding your .pem private key
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e

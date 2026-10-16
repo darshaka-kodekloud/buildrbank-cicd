@@ -4,8 +4,9 @@
 # Last week you did this by hand, in eleven commands. Nothing below is
 # new - it is the same commands, typed by a machine instead of by you.
 #
-#   on a branch ......  test
-#   on main .........   test -> build & push -> deploy -> check it is live
+#   on any branch ...  test
+#   on dev ..........  test -> build & push -> deploy to :8001, the sandbox
+#   on main .........  test -> build & push -> deploy to :8000, the real one
 #
 # One repository variable, three secrets, and five lines that say
 # TODO. Fill those in and the pipeline is yours.
@@ -14,9 +15,9 @@ name: Test, build, deploy
 
 # -----------------------------------------------------------------
 # WHEN. Every push to every branch, and every pull request.
-# The build and deploy jobs further down are fenced off to main, so a
-# branch gets you tests and nothing else. That is what makes a branch
-# a safe place to be wrong.
+# The build and deploy jobs further down are fenced off to two branches,
+# main and dev. Every other branch gets you tests and nothing else. That
+# is what makes a branch a safe place to be wrong.
 # -----------------------------------------------------------------
 on:
   push:
@@ -74,10 +75,11 @@ jobs:
   build:
     name: Build and push
     needs: test                              # red tests, no image. Full stop.
-    # Two conditions. A branch stops at the tests; and so does a repo
-    # where DOCKERHUB_USER has not been set yet, which is why this says
-    # "skipped" rather than "failed" before you have configured anything.
-    if: github.ref == 'refs/heads/main' && vars.DOCKERHUB_USER != ''
+    # Two conditions. Only main and dev build an image - every other
+    # branch stops at the tests. And so does a repo where DOCKERHUB_USER
+    # has not been set yet, which is why this says "skipped" rather than
+    # "failed" before you have configured anything.
+    if: contains(fromJSON('["main","dev"]'), github.ref_name) && vars.DOCKERHUB_USER != ''
     runs-on: ubuntu-24.04
     steps:
       - name: Get the code
@@ -123,13 +125,16 @@ jobs:
           # own id:
           #   ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:${{ github.sha }}
           #
-          # `latest` moves every time you push, so it cannot take you back.
+          # The first tag is the branch's own name - :main or :dev. It
+          # moves every time you push to that branch, so it cannot take
+          # you back; and it keeps the two branches apart, so a dev build
+          # can never become the thing main deploys.
           # The sha tag never moves. It is how you undo a bad afternoon.
           #
           # (Keep the comment OUTSIDE the list below. Under `tags: |` every
           # line is a tag, including one that starts with a #.)
           tags: |
-            ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:latest
+            ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:${{ github.ref_name }}
             ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -140,8 +145,20 @@ jobs:
   deploy:
     name: Deploy to EC2
     needs: build
-    if: github.ref == 'refs/heads/main' && vars.DOCKERHUB_USER != ''
+    if: contains(fromJSON('["main","dev"]'), github.ref_name) && vars.DOCKERHUB_USER != ''
     runs-on: ubuntu-24.04
+    # One server, two slots. The branch you pushed decides which slot you
+    # land in, and nothing else about this job changes.
+    #
+    #   main  ->  container "bank"      on port 8000   the real one
+    #   dev   ->  container "bank-dev"  on port 8001   the sandbox
+    #
+    # Both read the same ~/.env, so both talk to the same Supabase. dev is
+    # a separate container, not a separate world - remember that before
+    # you experiment with anything that writes.
+    env:
+      SLOT: ${{ github.ref_name == 'main' && 'bank' || 'bank-dev' }}
+      PORT: ${{ github.ref_name == 'main' && '8000' || '8001' }}
     steps:
       - name: Swap the container
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1.2.5
@@ -153,11 +170,9 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
-            docker pull ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:latest
-            docker rm -f bank || true
-            docker run -d --name bank --restart unless-stopped \
-              -p 8000:8000 --env-file ~/.env \
-              ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:latest
+            docker pull ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:${{ github.ref_name }}
+            docker rm -f ${{ env.SLOT }} || true
+            docker run -d --name ${{ env.SLOT }} --restart unless-stopped -p ${{ env.PORT }}:8000 --env-file ~/.env ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:${{ github.ref_name }}
 
       - name: Is it actually up?
         # The deploy step going green only means the commands ran. This asks
@@ -166,7 +181,7 @@ jobs:
         # whole thing works, not just that Docker was willing to start it.
         run: |
           for i in $(seq 1 10); do
-            if curl -fsS "http://${{ secrets.EC2_HOST }}:8000/health" \
+            if curl -fsS "http://${{ secrets.EC2_HOST }}:${{ env.PORT }}/health" \
                | grep -q '"status":"ok"'; then
               echo "live"
               exit 0
@@ -174,5 +189,5 @@ jobs:
             echo "not answering yet ($i/10)"
             sleep 5
           done
-          echo "::error::the server never came up - check: docker logs bank"
+          echo "::error::the server never came up - check: docker logs ${{ env.SLOT }}"
           exit 1

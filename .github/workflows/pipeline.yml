@@ -155,7 +155,7 @@ jobs:
             set -e
             docker pull ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:latest
             docker rm -f bank || true
-            docker run -d --name bank -restart unless-stopped \
+            docker run -d --name bank --restart unless-stopped \
               -p 8000:8000 -env-file ~/.env \
               ${{ env.DOCKERHUB_USER }}/${{ env.IMAGE }}:latest
 

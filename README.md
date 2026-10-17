@@ -12,12 +12,20 @@ Nothing about the application changes. Same image, same server, same Docker
 Hub, same commands. Only the typist changes.
 
 ```
-push to a branch ──▶ test                                   stops here
-push to main     ──▶ test ──▶ build & push ──▶ deploy ──▶ is it really up?
+push to any branch ──▶ test                                     stops here
+push to dev        ──▶ test ──▶ build & push ──▶ deploy to :8001
+push to main       ──▶ test ──▶ build & push ──▶ deploy to :8000
 ```
 
-A branch gets you the tests and nothing else. That is what makes a branch a
-safe place to be wrong.
+One server, two slots. `dev` lands in a sandbox container on port 8001,
+`main` lands in the real one on port 8000. Any other branch gets the tests
+and nothing else — that is what makes a branch a safe place to be wrong.
+
+![how it fits together](docs/diagram-4.png)
+
+> **Doing this for the first time?** [`STEPS.md`](STEPS.md) is the same
+> journey as a numbered checklist — nineteen steps, every command written
+> out. This file explains *why*; that one tells you *what to type*.
 
 ---
 
@@ -40,16 +48,26 @@ twenty minutes — then come back here.
 
 Actions only runs in a repo you own. **Fork**, top right of this page.
 
+Clone it next to your Week 05 folder — the `cp` below is simpler that way:
+
 ```bash
 git clone https://github.com/YOUR-NAME/buildrbank-cicd.git
 cd buildrbank-cicd
 cp ../buildrbank-deploy/.env .env        # the one file that is never in git
 ```
 
+If Week 05 lives somewhere else, use the full path — and quote it if any
+folder name has a space in it, or the shell splits the path and you get
+`cp: .env: Not a directory`:
+
+```bash
+cp "/Users/you/My Documents/buildrbank-deploy/.env" .env
+```
+
 Prove it still works before you change anything:
 
 ```bash
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate                # Windows: .venv\Scripts\activate
 python -m pip install -r requirements.txt -r requirements-dev.txt
 python scripts/check.py
@@ -57,9 +75,12 @@ python scripts/check.py
 
 **Checkpoint —** six green ticks.
 
+> `pip` errors about building wheels? Your Python is newer than the 3.12 the
+> container uses. Install 3.12 and run `python3.12 -m venv .venv` instead.
+
 ---
 
-## 2 · A server, and an address that stays
+## 2 · One server, two slots
 
 ### Launch it
 
@@ -70,49 +91,31 @@ EC2 → **Launch instance**.
 | Image | Ubuntu, 64-bit **x86** |
 | Size | `t3.micro` |
 | Key pair | download the `.pem` — you only get it once |
-| Firewall | allow **22** and **8000**, source **Anywhere-IPv4** |
+| Firewall | allow **22**, **8000** and **8001**, source **Anywhere-IPv4** |
+
+Three ports, not two. `8000` is production and `8001` is the dev sandbox;
+[step 6](#6--change-something-and-watch-it-ship) is where you meet both.
 
 That firewall setting is wider than last week's. [Step 3](#3--why-port-22-is-open-to-everyone)
 explains why it has to be, and what it costs.
 
-### Give it an address that stays
+### The address
 
-The public IP that came with the instance is on loan. Stop the instance,
-start it again, and AWS hands you a different one.
+Copy the **Public IPv4 address** from the Instances page. That goes in `ssh`,
+in your browser, and in the `EC2_HOST` secret.
 
-That was survivable when you typed the address yourself. It is not
-survivable now, because you are about to write that address into a GitHub
-secret. If it changes, the pipeline keeps deploying to an address that is
-no longer yours, and the error will look nothing like "the IP changed".
-
-An **Elastic IP** is an address AWS sets aside for you and does not take back.
-
-EC2 → **Elastic IPs** (left menu, under *Network & Security*)
-
-1. **Allocate Elastic IP address** → Allocate
-2. select it → **Actions** → **Associate Elastic IP address**
-3. Resource type **Instance** → choose your instance → **Associate**
-
-From here on, that is *the* address. Use it in `ssh`, in your browser, and
-in the `EC2_HOST` secret.
-
-> **What it costs, and the trap.** AWS charges $0.005 per hour for every
-> public IPv4 address — about $3.65 a month. The EC2 free tier covers 750
-> hours a month of an address **attached to a running instance**, which is
-> one address, all month, free.
->
-> The trap is the other case. An Elastic IP you allocated and then left
-> *unattached* is billed at the full rate, free tier or not. So when you
-> terminate the instance at the end of the course, **release the Elastic IP
-> as well** — EC2 → Elastic IPs → select → Actions → **Release**. Otherwise
-> you go on paying for an address that points at nothing.
+> **Do not stop the instance.** A stopped instance hands its address back,
+> and starting it again gets you a different one — at which point the
+> pipeline keeps deploying to an address that is no longer yours, and the
+> error will look nothing like "the IP changed". If it happens anyway, it is
+> not fatal: put the new number in `EC2_HOST` and push again.
 
 ### Walk in and install Docker
 
 ```bash
 chmod 400 builder-bank.pem
-scp -i builder-bank.pem .env ubuntu@YOUR-ELASTIC-IP:~
-ssh -i builder-bank.pem ubuntu@YOUR-ELASTIC-IP
+scp -i builder-bank.pem .env ubuntu@YOUR-IP:~
+ssh -i builder-bank.pem ubuntu@YOUR-IP
 
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker ubuntu                 # then log out and back in
@@ -128,11 +131,14 @@ anything to get back on the air:
 
 ```bash
 docker login
-docker run -d --name bank --restart unless-stopped \
-  -p 8000:8000 --env-file ~/.env YOUR-NAME/buildrbank:v1
+docker run -d --name bank --restart unless-stopped -p 8000:8000 --env-file ~/.env YOUR-NAME/buildrbank:v1
 ```
 
-**Checkpoint —** `http://YOUR-ELASTIC-IP:8000` answers.
+**Checkpoint —** `http://YOUR-IP:8000` answers.
+
+> `not found` on the pull? Your Week 05 image may carry a different tag.
+> Open `hub.docker.com/r/YOUR-NAME/buildrbank/tags` and use whatever is
+> listed — any image of this app will do, because the pipeline replaces it.
 
 That is the last time you type any of this.
 
@@ -169,12 +175,24 @@ anything real, and it is not what we are doing today.
 | Name | Where it comes from |
 |---|---|
 | `DOCKERHUB_TOKEN` | Docker Hub → Account settings → Personal access tokens → Generate. **Not your password.** |
-| `EC2_HOST` | your Elastic IP. Just the number — no `http://`, no `:8000` |
+| `EC2_HOST` | your server's address. Just the number — no `http://`, no `:8000` |
 | `EC2_SSH_KEY` | the whole key file. `cat builder-bank.pem`, copy **everything**, including the `-----BEGIN` and `-----END` lines |
 
-> `EC2_SSH_KEY` is where this goes wrong most often. Miss the BEGIN line or
-> the final newline and the error you get back says `invalid format` and
-> nothing else useful.
+> `EC2_SSH_KEY` is where this goes wrong most often, and all three failures
+> produce an error that names something else.
+>
+> 1. **The `%` at the end.** Your terminal prints a `%` (or `⏎`) right after
+>    `-----END RSA PRIVATE KEY-----`. That is the shell saying the file has
+>    no final newline. It is **not part of the key** — do not copy it.
+> 2. **The missing newline it is telling you about.** After pasting into the
+>    secret box, **press Enter once**, so the cursor sits on an empty line
+>    below `-----END`. A key that stops dead on the last dash reads as
+>    `ssh: no key found`.
+> 3. **The `-----END` line itself.** Stopping one line short gives you
+>    `invalid format`.
+>
+> If you have an editor open, open the `.pem` as a file and use
+> `Cmd/Ctrl+A`, `Cmd/Ctrl+C` instead. You cannot miss a line that way.
 
 Now the **Variables** tab, right next to Secrets on the same page:
 
@@ -208,7 +226,12 @@ Five lines say `TODO`, each with a sentence of reading above it.
 | 2 | a second image tag — the commit's own id |
 | 3 | the name of the secret holding your server's address |
 | 4 | the name of the secret holding your key |
-| 5 | the `docker run` line — the one you typed in step 2, word for word |
+| 5 | production's port mapping |
+
+TODO 5 is a question, not a copy. `deploy-dev` just above it says
+`-p 8001:8000`. The number on the left is the door on the server; the number
+on the right is the port the app listens on inside the container, and that
+never changes. dev answers on 8001 — so which door does production answer on?
 
 Commit and push. The first run will probably be red. Open it, read the log,
 find the line. That is the skill.
@@ -218,48 +241,57 @@ find the line. That is the skill.
 ## 6 · Change something, and watch it ship
 
 ```bash
-git checkout -b my-first-change
+git switch -c dev
 ```
 
-Open `app/index.html` and change the header — `Support Console` to something
-of your own. Then:
+Open `app/index.html`. Near the top is the page's palette. Find every line
+that says `--ground:` — **there are three**, because the page has a light
+theme and a dark one:
+
+```
+line 24   --ground:#F4F5F3;     the light theme
+line 47   --ground:#141F1C;     dark, when your laptop is in dark mode
+line 54   --ground:#141F1C;     dark, chosen explicitly
+```
+
+`--ground` is the background the whole chat page sits on. Put a colour of
+your own in all three. Change only one and half the room sees no difference,
+because their laptop is in the other theme.
 
 ```bash
 git add app/index.html
-git commit -m "Rename the header"
-git push -u origin my-first-change
+git commit -m "A background of my own"
+git push -u origin dev
 ```
 
-Go to the **Actions** tab. Tests run; build and deploy sit greyed out,
-because you are on a branch. And one test is **red**:
+Go to the **Actions** tab: Tests, Build and push, and **Deploy to dev** —
+with *Deploy to production* greyed out, because `dev` is not `main`.
 
-```
-test_the_header_reads_support_console
-```
+- `http://YOUR-IP:8001` — **your colour**
+- `http://YOUR-IP:8000` — **still the old one**
 
-That is not a bug. `tests/test_api.py` says the header reads "Support
-Console", because somebody decided that once and wrote it down. You have
-changed the decision — so change the test too, in the same commit.
+That pair is the point of the week. One server, one push, two containers,
+and `main` was never touched.
 
-Then open a pull request, watch it go green, and merge.
+Now open a pull request, watch the checks go green, and merge. Merging puts
+it on `main`, which runs the same three jobs and this time lands in
+**production**. About four minutes.
 
-Merging puts it on `main`, which runs the whole pipeline: test, build, push,
-deploy, and a last check that the server really answers. About four minutes.
-Open `http://YOUR-ELASTIC-IP:8000` and your change is there — on a machine
-you never logged into.
+Open `http://YOUR-IP:8000` and your change is there — on a machine you
+never logged into.
 
 ---
 
 ## When you need yesterday back
 
-Every build pushes two tags: `:latest`, which moves, and `:<commit id>`,
-which never does. So going back is not a rebuild. It is a different tag:
+Every build pushes two tags: the branch's own name (`:main`, `:dev`), which
+moves, and `:<commit id>`, which never does. So going back is not a rebuild.
+It is a different tag:
 
 ```bash
-ssh -i builder-bank.pem ubuntu@YOUR-ELASTIC-IP
+ssh -i builder-bank.pem ubuntu@YOUR-IP
 docker rm -f bank
-docker run -d --name bank --restart unless-stopped \
-  -p 8000:8000 --env-file ~/.env YOUR-NAME/buildrbank:THE-OLD-COMMIT-ID
+docker run -d --name bank --restart unless-stopped -p 8000:8000 --env-file ~/.env YOUR-NAME/buildrbank:THE-OLD-COMMIT-ID
 ```
 
 That is the whole reason to tag twice.
@@ -292,13 +324,15 @@ different week.
 
 | What you see | Where to look |
 |---|---|
-| **`invalid format` in the deploy job** | `EC2_SSH_KEY`. Re-paste the whole `.pem`, BEGIN and END lines included. |
+| **`ssh: no key found` in the deploy job** | `EC2_SSH_KEY` has no final newline. Re-paste and press Enter after `-----END`. |
+| **`invalid format` in the deploy job** | `EC2_SSH_KEY` is missing the BEGIN or END line — or you copied the `%` the shell printed after it. |
+| **`URL rejected` from curl, or `unknown shorthand flag`** | your paste lost a character. It is `https://` with two slashes, and `--name` with two dashes. Copy from `STEPS.md`, not from the PDF. |
 | **`insufficient scopes` when pushing the image** | The Docker Hub token is read-only. Note that *logging in* still succeeded — the scope only bites at the push, so the error arrives late and blames the wrong step. Generate a new token with **Read & Write**. |
 | **`Permission denied (publickey)`** | right key, wrong user. It is `ubuntu`, not `ec2-user`. |
-| **Deploy is green, the site is old** | you pushed `:latest` but ran a different tag on the server. Check TODO 6. |
+| **Deploy is green, the page is unchanged** | hard-refresh, and check the port — 8001 is dev, 8000 is production. |
 | **`connection timed out` on ssh** | port 22 is still restricted to *My IP*. See [step 3](#3--why-port-22-is-open-to-everyone). |
 | **Build and deploy say "skipped"** | the `DOCKERHUB_USER` variable is not set. Variables tab, not Secrets. |
-| **It worked yesterday, now nothing deploys** | the instance restarted and the IP moved. That is what the Elastic IP prevents — check it is still *associated*. |
+| **It worked yesterday, now nothing deploys** | the instance was stopped and restarted, so its address moved. Put the new one in `EC2_HOST`. |
 | **The container exits immediately** | `docker logs bank`. Almost always a missing key in `~/.env`. |
 | **It answers, but knows nothing** | `seed-2-knowledge.sql` did not finish. Re-run it in the SQL editor. |
 
@@ -336,7 +370,7 @@ are under **Project Overview** → the **Copy** button beside the project name.
 **4 · Install.**
 
 ```bash
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate                # Windows: .venv\Scripts\activate
 python -m pip install -r requirements.txt
 python scripts/check.py
@@ -374,6 +408,7 @@ tests/            ten tests. No keys, no network, no opinions about answers.
 .github/
   workflows/
     pipeline.yml  test -> build -> deploy. This week lives here.
+STEPS.md          the whole thing as a numbered checklist, by hand
 docs/             diagrams, and how it all fits together
 ```
 
